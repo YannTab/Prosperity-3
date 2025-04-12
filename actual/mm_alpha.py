@@ -248,6 +248,15 @@ class Product():
                 self.best_ask, self.best_ask_amount = list(self.order_depth.sell_orders.items())[0]
             else:
                 self.best_ask, self.best_ask_amount = None, None
+    
+    def get_safe_trade_size(self, signal, desired_size, current_position):
+        if signal == "BUY":
+            max_size = self.available_long - max(current_position, 0)
+            return int(min(desired_size, max_size))
+        elif signal == "SELL":
+            max_size = self.available_short + min(current_position, 0)
+            return int(min(desired_size, max_size))
+        return 0
 
 
 class Kelp(Product):
@@ -316,6 +325,69 @@ class Rainforest_Resin(Product):
         super().__init__(product, position, max_position, target_profit, order_depth, fair_price, quote_base_volume)
 
 
+class Squid_Ink(Product):
+    def __init__(self, product, position, max_position, target_profit, order_depth, fair_price=None, quote_base_volume=1):
+        super().__init__(product, position, max_position, target_profit, order_depth, fair_price, quote_base_volume)
+        self.signal_expiration = 4
+
+    def signal_extrema_reversion(self, traderData, orders, result):
+        if self.product not in traderData:
+            traderData[self.product] = {
+                'prices': [],
+                'returns': [],
+            }
+            
+        traderData[self.product]['prices'].append(self.fair_price)
+
+        if len(traderData[self.product]['prices']) > 50:
+            traderData[self.product]['prices'].pop(0)
+
+        # Compute return
+        prices = traderData[self.product]['prices']
+        if len(prices) >= 2:
+            ret = prices[-1] / prices[-2] - 1
+            traderData[self.product]['returns'].append(ret)
+        if len(traderData[self.product]['returns']) > 50:
+            traderData[self.product]['returns'].pop(0)
+
+        returns = traderData[self.product]['returns']
+        position = self.position
+        logger.print(f'Returns: {returns}')
+
+        # Parameters
+        up_threshold = 0.001326
+        down_threshold = -0.0014
+
+        # Entry logic
+        if position == 0 and len(returns) >= 2:
+            r_t_minus1 = returns[-2]
+            r_t = returns[-1]
+
+            if r_t < r_t_minus1 and r_t < down_threshold:
+                # Enter long
+                orders.append(Order(self.product, self.mm_ask, int(self.available_long)))
+                logger.print(f'Extrema {self.product} - BUY {int(self.available_long)} - @ {self.mm_ask}')
+                result[self.product] = orders
+
+            elif r_t > r_t_minus1 and r_t > up_threshold:
+                # Enter short
+                orders.append(Order(self.product, self.mm_bid, -int(self.available_short)))
+                logger.print(f'Extrema {self.product} - SELL {int(self.available_short)} - @ {self.mm_bid}')
+                result[self.product] = orders
+
+        # Exit logic — close position on next tick
+        elif position != 0:
+            exit_volume = int(self.available_long if position < 0 else self.available_short)
+            exit_price = self.mm_ask if position < 0 else self.mm_bid
+            exit_qty = exit_volume if position < 0 else -exit_volume
+
+            orders.append(Order(self.product, exit_price, exit_qty))
+            logger.print(f'Extrema {self.product} - EXIT {"SHORT" if position < 0 else "LONG"} {abs(exit_qty)} @ {exit_price}')
+            result[self.product] = orders
+
+        return 
+
+
 class Trader:
     def __init__(self):
         pass
@@ -335,7 +407,7 @@ class Trader:
                     product='RAINFOREST_RESIN',
                     position=position,
                     max_position=50,
-                    target_profit=4, 
+                    target_profit=8, 
                     order_depth=order_depth,
                     fair_price=10000,
                     quote_base_volume=38
@@ -350,7 +422,7 @@ class Trader:
                     product='KELP',
                     position=position,
                     max_position=50,
-                    target_profit=0.7, 
+                    target_profit=0.8, 
                     order_depth=order_depth,
                     fair_price=None,
                     quote_base_volume=40
@@ -362,6 +434,25 @@ class Trader:
                 kelp_instance.market_make(orders=orders)
                 result[product] = orders
 
+            # if product == 'SQUID_INK':
+            #     squid_ink_instance = Squid_Ink(
+            #         product='SQUID_INK',
+            #         position=position,
+            #         max_position=25,
+            #         target_profit=0.4, 
+            #         order_depth=order_depth,
+            #         fair_price=None,
+            #         quote_base_volume=5
+            #     )
+            #     squid_ink_instance.signal_extrema_reversion(traderData=traderData, orders=orders, result=result)
+            #     # SIGNAL = squid_ink_instance.signal_rsi_reversion(traderData=traderData, orders=orders, result=result)
+            #     # if SIGNAL:
+            #     #     continue
+            #     result[product] = orders
+
         serialized_trader_data = json.dumps(traderData)
         logger.flush(state, result, None, serialized_trader_data)
         return result, None, serialized_trader_data
+
+
+
